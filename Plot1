@@ -1,0 +1,68 @@
+import pandas as pd
+import numpy as np
+import snowflake.connector
+import matplotlib.pyplot as plt
+import plotly.express as px
+
+conn = snowflake.connector.connect(
+    user='SAGESNOW',
+    password='V2^cHfBnQQdbx28duWx*d',
+    account='ESA97740.east-us-2.azure',
+    warehouse='COMPUTE_WH',
+    database='SAGENEXTGEN',
+    schema='PUBLIC'
+)
+cursor = conn.cursor()
+query = "SELECT * from TRADERS.BLOOMBERG_IMPORTS.BLOOMBERG_IMPORT_BOND WHERE ISSRCLSL1 = 'CORPORATES' AND OUTSTANDE > 299999 AND DURADJMOD > 0.5 AND TYPPLACMT = 'SEC' AND TYPSUBORD = 'SRNOTES' AND ENTRY_DAY = '2025-02-25'"
+cursor.execute(query)
+df = pd.DataFrame(cursor.fetchall(), columns=[desc[0] for desc in cursor.description])
+cursor.close()
+conn.close()
+
+def eliminate_low_frequency_tickers(df, column_name='TICKER', min_count=5):
+    # Count the occurrences of each ticker
+    ticker_counts = df['TICKER'].value_counts()
+    # Filter the DataFrame to keep only tickers with at least min_count appearances
+    filtered_df = df[df['TICKER'].isin(ticker_counts[ticker_counts >= min_count].index)]
+    return filtered_df
+
+df_selected = eliminate_low_frequency_tickers(df, column_name='TICKER', min_count=5)
+df_selected = df_selected[(df_selected['QUALITYE'].isin(['AAA','AA1','AA2','AA3','A1','A2','A3','BAA1','BAA2','BAA3','BA1']))]
+
+df_selected = df[['CUSIP', 'DURADJMOD', 'OAS_BP','TICKER' ]]
+df_selected['DURADJMOD'] = pd.to_numeric(df_selected['DURADJMOD'])
+df_selected['OAS_BP'] = pd.to_numeric(df_selected['OAS_BP'])
+df_selected = df_selected.drop_duplicates(subset=['CUSIP'])
+
+
+
+df_selected['DURADJMOD'] = pd.to_numeric(df_selected['DURADJMOD'], errors='coerce')
+df_selected['OAS_BP'] = pd.to_numeric(df_selected['OAS_BP'], errors='coerce')
+df_selected.dropna(subset=['DURADJMOD', 'OAS_BP'], inplace=True)
+df_selected = df_selected.drop_duplicates(subset=['DURADJMOD', 'OAS_BP'])
+# Filter the DataFrame
+df_filtered = df_selected[(df_selected['OAS_BP'] >= 30) & (df_selected['TICKER'] = 'TMUS') ]
+# Ensure unique values
+df_filtered = df_filtered.drop_duplicates(subset=['DURADJMOD', 'OAS_BP'])
+# Extract x and y values
+x = df_filtered['DURADJMOD']
+y = df_filtered['OAS_BP']
+# Perform logarithmic fit
+log_fit = np.polyfit(np.log(x), y, 1)
+log_line = np.poly1d(log_fit)
+# Define the Nelson-Siegel function
+def nelson_siegel(t, beta0, beta1, beta2, tau):
+    return beta0 + beta1 * (1 - np.exp(-t / tau)) / (t / tau) + beta2 * ((1 - np.exp(-t / tau)) / (t / tau) - np.exp(-t / tau))
+# Initial guess for the parameters
+initial_guess = [0, 0, 0, 1]
+# Fit the Nelson-Siegel model
+params, _ = curve_fit(nelson_siegel, x, y, p0=initial_guess)
+# Generate the Nelson-Siegel fit line
+ns_fit_line = nelson_siegel(x, *params)
+# Create scatter plot
+fig = px.scatter(df_filtered, x='DURADJMOD', y='OAS_BP', title='Modified Duration vs OAS', labels={'DURADJMOD': 'Modified Duration', 'OAS_BP': 'OAS'}, hover_data=['CUSIP', 'TICKER'])
+# Add logarithmic fit line
+fig.add_scatter(x=x, y=log_line(np.log(x)), mode='lines', name='Logarithmic Fit', line=dict(color='green'))
+# Add Nelson-Siegel fit line
+fig.add_scatter(x=x, y=ns_fit_line, mode='lines', name='Nelson-Siegel Fit', line=dict(color='blue'))
+fig.show()
