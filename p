@@ -95,3 +95,43 @@ plt.ylabel("OAS_BP")
 plt.title("Logarithmic Fit to 37 Data Points")
 plt.legend()
 plt.show()
+
+
+
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from scipy.optimize import curve_fit
+
+# Ensure DURADJMOD is positive
+df_filtered = df_filtered[df_filtered['DURADJMOD'] > 0]
+
+# Extract x and y values
+x = df_filtered['DURADJMOD']
+y = df_filtered['OAS_BP']
+
+# Define log function
+def log_func(x, a, b):
+    return a * np.log(x) + b
+
+# Fit the log function
+params, _ = curve_fit(log_func, x, y)
+y_fit = log_func(x, *params)
+
+# Sort x-values for a smooth line
+sorted_indices = np.argsort(x)
+x_sorted = x.iloc[sorted_indices]
+y_fit_sorted = y_fit[sorted_indices]
+
+# Create scatter plot with Plotly Express
+fig = px.scatter(df_filtered, x='DURADJMOD', y='OAS_BP', title='Modified Duration vs OAS',
+                 labels={'DURADJMOD': 'Modified Duration', 'OAS_BP': 'OAS'},
+                 hover_data=['CUSIP', 'TICKER'])
+
+# Add log-fit line using Plotly Graph Objects
+fig.add_trace(go.Scatter(x=x_sorted, y=y_fit_sorted, mode='lines', 
+                         name='Logarithmic Fit', line=dict(color='red')))
+
+# Show plot
+fig.show()
