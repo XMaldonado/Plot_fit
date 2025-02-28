@@ -56,3 +56,42 @@ fig.add_scatter(x=x, y=log_fit_y, mode='lines', name='Logarithmic Fit', line=dic
 
 # Show plot
 fig.show()
+
+
+
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+
+# Example dataset (assuming 37 data points)
+x = df_filtered['DURADJMOD']
+y = df_filtered['OAS_BP']
+
+# Ensure x > 0
+x = x[x > 0]
+y = y.loc[x.index]  # Match y values to filtered x
+
+# Define the logarithmic function
+def log_func(x, a, b):
+    return a * np.log(x) + b
+
+# Fit the log function
+params, covariance = curve_fit(log_func, x, y)
+
+# Extract fitted parameters
+a, b = params
+
+# Generate fitted values
+y_fit = log_func(x, a, b)
+
+# Plot data and fit
+plt.figure(figsize=(8,5))
+plt.scatter(x, y, label="Data", color='blue')
+plt.plot(x, y_fit, label=f"Log Fit: y = {a:.3f} * log(x) + {b:.3f}", color='red')
+plt.xlabel("DURADJMOD")
+plt.ylabel("OAS_BP")
+plt.title("Logarithmic Fit to 37 Data Points")
+plt.legend()
+plt.show()
