@@ -3,6 +3,8 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from scipy.optimize import curve_fit
+import snowflake.connector
+import matplotlib.pyplot as plt
 
 # Sample Data
 data = {
@@ -14,39 +16,50 @@ data = {
 
 df_selected = pd.DataFrame(data)
 
+
+def eliminate_low_frequency_tickers(df, column_name='TICKER', min_count=5):
+    # Count the occurrences of each ticker
+    ticker_counts = df['TICKER'].value_counts()
+    # Filter the DataFrame to keep only tickers with at least min_count appearances
+    filtered_df = df[df['TICKER'].isin(ticker_counts[ticker_counts >= min_count].index)]
+    return filtered_df
+df_selected = eliminate_low_frequency_tickers(df, column_name='TICKER', min_count=5)
+df_selected = df_selected[(df_selected['QUALITYE'].isin(['AAA','AA1','AA2','AA3','A1','A2','A3','BAA1','BAA2','BAA3','BA1']))]
+# Select necessary columns
+df_selected = df_selected[['CUSIP', 'DURADJMOD', 'OAS_BP', 'TICKER']]
+# Convert numeric columns to proper format
+df_selected['DURADJMOD'] = pd.to_numeric(df_selected['DURADJMOD'], errors='coerce')
+df_selected['OAS_BP'] = pd.to_numeric(df_selected['OAS_BP'], errors='coerce')
+# Drop missing values and duplicates
+df_selected.dropna(subset=['DURADJMOD', 'OAS_BP'], inplace=True)
+df_selected = df_selected.drop_duplicates(subset=['CUSIP'])
+# Filter for OAS_BP ≥ 30 and TICKER == 'TMUS'
+#df_filtered = df_selected[(df_selected['OAS_BP'] >= 30) & (df_selected['TICKER'] == 'TMUS')]
+df_selected = df_selected[(df_selected['TICKER'] == 'TMUS')]
+df_selected = df_selected.drop_duplicates(subset=['DURADJMOD', 'OAS_BP'])
 # Remove negative OAS_BP values
 df_selected = df_selected[df_selected['OAS_BP'] > 0]
-
 # Ensure DURADJMOD > 0 for log fitting
 df_selected = df_selected[df_selected['DURADJMOD'] > 0]
-
 # Extract x and y values
 x = df_selected['DURADJMOD'].values  # Convert to NumPy for sorting
 y = df_selected['OAS_BP'].values
-
 # Define log function
 def log_func(x, a, b):
     return a * np.log(x) + b
-
 # Fit the log function
 params, _ = curve_fit(log_func, x, y)
-
 # Compute predicted y values
 y_fit = log_func(x, *params)
-
 # Sort x-values for a smooth line
 sorted_indices = np.argsort(x)
 x_sorted = x[sorted_indices]
 y_fit_sorted = y_fit[sorted_indices]
-
 # Create scatter plot with Plotly Express
 fig = px.scatter(df_selected, x='DURADJMOD', y='OAS_BP', title='Modified Duration vs OAS',
                  labels={'DURADJMOD': 'Modified Duration', 'OAS_BP': 'OAS'},
                  hover_data=['CUSIP', 'TICKER'])
-
 # Add logarithmic fit line using Plotly Graph Objects
 fig.add_trace(go.Scatter(x=x_sorted, y=y_fit_sorted, mode='lines', 
                          name='Logarithmic Fit', line=dict(color='red')))
-
-# Show plot
 fig.show()
