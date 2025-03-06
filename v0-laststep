@@ -1,0 +1,346 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import snowflake.connector
+from pandas.tseries.offsets import MonthBegin
+ 
+conn = snowflake.connector.connect(
+    user='SAGESNOW',
+    password='V2^cHfBnQQdbx28duWx*d',
+    account='ESA97740.east-us-2.azure',
+    warehouse='COMPUTE_WH',
+    database='TRADERS',
+    schema='PUBLIC'
+)
+# Initialize cursor
+cursor = conn.cursor()
+# Define the query
+query = """SELECT fm.entity_id, fm.effective_date, trim(sd.ticker) as TICK, left(sd.SECURITY_ID, 8) as CUSIP, sd.*,pd.* FROM EAGLE.datamartdbo_fund_summary fs
+INNER JOIN EAGLE.datamartdbo_fund_master fm ON fm.dmart_fund_id = fs.dmart_fund_id
+INNER JOIN EAGLE.datamartdbo_position_details pd ON pd.dmart_fund_id = fs.dmart_fund_id
+INNER JOIN EAGLE.datamartdbo_security_details sd ON sd.security_alias  = pd.security_alias and sd.effective_date = fm.effective_date
+WHERE sd.security_type = ('Corporate')
+AND fm.effective_date = (select max(fmInner.effective_date) from EAGLE.datamartdbo_fund_master fmInner where fmInner.entity_id = fm.entity_id)
+AND fm.effective_date = current_date()-1"""
+# Execute the query
+cursor.execute(query)
+#print(cursor.execute(query))
+# Fetch the result and load it into a DataFrame
+df = cursor.fetch_pandas_all()
+df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
+# Close the cursor and connection
+cursor.close()
+conn.close()
+
+pos_df = df.groupby(['CUSIP', 'TICK'])['SHARE_PAR_VALUE'].sum().reset_index()
+final_pos_df = pos_df[pos_df['SHARE_PAR_VALUE'] > 2000000]
+final_pos_df.shape
+final_pos_df.tail()
+
+
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import snowflake.connector
+from pandas.tseries.offsets import MonthBegin
+ 
+conn = snowflake.connector.connect(
+    
+    user='SAGESNOW',
+    password='V2^cHfBnQQdbx28duWx*d',
+    account='ESA97740.east-us-2.azure',
+    warehouse='COMPUTE_WH',
+    database='SAGENEXTGEN',
+    schema='PUBLIC'
+)
+
+# Initialize cursor
+cursor = conn.cursor()
+
+# Define the query
+query = "SELECT * from TRADERS.BLOOMBERG_IMPORTS.BLOOMBERG_IMPORT_BOND WHERE ISSRCLSL1 = 'CORPORATES' AND DURADJMOD > 1.0 AND OUTSTANDE > 299999 AND TYPPLACMT = 'SEC' AND TYPSUBORD = 'SRNOTES' AND ENTRY_DAY = '2025-02-26'"
+
+
+
+# Execute the query
+cursor.execute(query)
+
+# Fetch the result and load it into a DataFrame
+df = cursor.fetch_pandas_all()
+
+# Close the cursor and connection
+cursor.close()
+conn.close()
+
+
+
+def eliminate_low_frequency_tickers(df, column_name='TICKER', min_count=5):
+    # Count the occurrences of each ticker
+    ticker_counts = df['TICKER'].value_counts()
+    
+    # Filter the DataFrame to keep only tickers with at least min_count appearances
+    filtered_df = df[df['TICKER'].isin(ticker_counts[ticker_counts >= min_count].index)]
+    
+    return filtered_df
+
+filtered_df = eliminate_low_frequency_tickers(df, column_name='TICKER', min_count=5)
+filtered_df_final = filtered_df[(filtered_df['QUALITYE'].isin(['AAA','AA1','AA2','AA3','A1','A2','A3','BAA1','BAA2','BAA3','BA1']))]
+filtered_df_final.shape
+filtered_df_final.tail()
+unique_count = filtered_df_final['TICKER'].nunique()
+unique_count
+curve_data = pd.merge(filtered_df_final, final_pos_df, on=['CUSIP'], how='left', indicator='Own?')
+curve_data['Own?'] = curve_data['Own?'].map({'left_only': 'N', 'both': 'Y'})
+curve_data.tail(25)
+
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from scipy.optimize import curve_fit
+import snowflake.connector
+import matplotlib.pyplot as plt
+
+# Set deviation threshold (change this value)
+deviation_threshold = 5  # Change this to any percentage you want
+'''
+conn = snowflake.connector.connect(
+    user='SAGESNOW',
+    password='V2^cHfBnQQdbx28duWx*d',
+    account='ESA97740.east-us-2.azure',
+    warehouse='COMPUTE_WH',
+    database='SAGENEXTGEN',
+    schema='PUBLIC'
+)
+cursor = conn.cursor()
+query = "SELECT * FROM TRADERS.BLOOMBERG_IMPORTS.BLOOMBERG_IMPORT_BOND WHERE ISSRCLSL1 = 'CORPORATES' AND OUTSTANDE > 299999 AND DURADJMOD > 1 AND TYPPLACMT = 'SEC' AND TYPSUBORD = 'SRNOTES' AND TICKER = 'JPM' AND ENTRY_DAY = '2025-03-04'"
+
+cursor.execute(query)
+df = pd.DataFrame(cursor.fetchall(), columns=[desc[0] for desc in cursor.description])
+cursor.close()
+conn.close()
+
+def eliminate_low_frequency_tickers(df, column_name='TICKER', min_count=5):
+    # Count the occurrences of each ticker
+    ticker_counts = df['TICKER'].value_counts()
+    # Filter the DataFrame to keep only tickers with at least min_count appearances
+    filtered_df = df[df['TICKER'].isin(ticker_counts[ticker_counts >= min_count].index)]
+    return filtered_df
+df_selected = eliminate_low_frequency_tickers(df, column_name='TICKER', min_count=5)
+df_selected = df_selected[(df_selected['QUALITYE'].isin(['AAA','AA1','AA2','AA3','A1','A2','A3','BAA1','BAA2','BAA3','BA1']))]
+# Select necessary columns
+'''
+
+df_selected = curve_data
+df_selected = df_selected[['CUSIP', 'DURADJMOD', 'OAS_BP', 'TICKER','Own?']]
+# Convert numeric columns to proper format
+df_selected['DURADJMOD'] = pd.to_numeric(df_selected['DURADJMOD'], errors='coerce')
+df_selected['OAS_BP'] = pd.to_numeric(df_selected['OAS_BP'], errors='coerce')
+# Drop missing values and duplicates
+df_selected.dropna(subset=['DURADJMOD', 'OAS_BP'], inplace=True)
+df_selected = df_selected.drop_duplicates(subset=['CUSIP'])
+df_selected = df_selected[(df_selected['TICKER'] == 'HCA')]
+# Remove negative OAS_BP values
+df_selected = df_selected[df_selected['OAS_BP'] > 0]
+# Ensure DURADJMOD > 0 for log fitting
+df_selected = df_selected[df_selected['DURADJMOD'] > 0]
+# Get unique tickers
+unique_tickers = sorted(df_selected['TICKER'].unique())
+
+# Create figure
+fig = go.Figure()
+# Store outlier information
+outlier_report = []
+# Dropdown buttons
+buttons = []
+for ticker in unique_tickers:
+    # Filter for selected ticker
+    df_filtered = df_selected[df_selected['TICKER'] == ticker]
+
+    # Extract x and y values
+    x = df_filtered['DURADJMOD'].values
+    y = df_filtered['OAS_BP'].values
+
+    # Define log function
+    def log_func(x, a, b):
+        return a * np.log(x) + b
+
+    # Fit the log function
+    if len(x) > 1:
+        params, _ = curve_fit(log_func, x, y)
+        y_fit = log_func(x, *params)
+
+        # Sort x-values for smooth line
+        sorted_indices = np.argsort(x)
+        x_sorted = x[sorted_indices]
+        y_fit_sorted = y_fit[sorted_indices]
+
+        # Compute dynamic deviation limits
+        upper_factor = 1 + (deviation_threshold / 100)
+        lower_factor = 1 - (deviation_threshold / 100)
+
+        y_fit_upper = y_fit_sorted * upper_factor
+        y_fit_lower = y_fit_sorted * lower_factor
+
+        # Detect outliers and record deviations
+        for i in range(len(x)):
+            actual = y[i]
+            expected = log_func(x[i], *params)
+            deviation = ((actual - expected) / expected) * 100
+            deviation2 = (actual - expected)
+            deviation = deviation2
+
+            if actual > expected * upper_factor or actual < expected * lower_factor:
+                outlier_report.append({
+                    "CUSIP": df_filtered.iloc[i]['CUSIP'],
+                    "TICKER": ticker,
+                    "DURADJMOD": x[i],
+                    "OAS_BP": actual,
+                    #"Deviation (%)": round(deviation, 2),
+                    "Deviation": round(deviation2, 2),
+                    "Above/Below": "Above" if deviation > 0 else "Below"
+                })
+
+        # Add scatter trace with hover info
+        scatter_trace = go.Scatter(
+            x=df_filtered['DURADJMOD'],
+            y=df_filtered['OAS_BP'],
+            mode='markers',
+            marker=dict(size=8),
+            name=f'Scatter: {ticker}',
+            visible=False,
+            hovertemplate="<b>CUSIP:</b> %{customdata[0]}<br><b>Ticker:</b> %{customdata[1]}<br><b>Duration:</b> %{x}<br><b>OAS:</b> %{y}",
+            customdata=df_filtered[['CUSIP', 'TICKER']].values
+        )
+
+        # Add log fit trace
+        log_trace = go.Scatter(
+            x=x_sorted,
+            y=y_fit_sorted,
+            mode='lines',
+            line=dict(color='red'),
+            name=f'Log Fit: {ticker}',
+            visible=False
+        )
+
+        # Add Upper Bound (Dynamic %)
+        log_upper_trace = go.Scatter(
+            x=x_sorted,
+            y=y_fit_upper,
+            mode='lines',
+            line=dict(color='green', dash='dash'),
+            name=f'{deviation_threshold}% Above Log Fit: {ticker}',
+            visible=False
+        )
+
+        # Add Lower Bound (Dynamic %)
+        log_lower_trace = go.Scatter(
+            x=x_sorted,
+            y=y_fit_lower,
+            mode='lines',
+            line=dict(color='blue', dash='dash'),
+            name=f'{deviation_threshold}% Below Log Fit: {ticker}',
+            visible=False
+        )
+
+        # Add traces
+        fig.add_trace(scatter_trace)
+        fig.add_trace(log_trace)
+        fig.add_trace(log_upper_trace)
+        fig.add_trace(log_lower_trace)
+
+        # Create dropdown button
+        button = dict(
+            label=ticker,
+            method="update",
+            args=[{"visible": [False] * len(fig.data)}]
+        )
+
+        # Enable relevant traces
+        button["args"][0]["visible"][-4] = True  # Scatter trace
+        button["args"][0]["visible"][-3] = True  # Log fit trace
+        button["args"][0]["visible"][-2] = True  # Upper bound
+        button["args"][0]["visible"][-1] = True  # Lower bound
+
+        buttons.append(button)
+
+# Show first ticker’s traces by default
+for i in range(4):
+    fig.data[i].visible = True  
+
+
+# Add dropdown menu
+fig.update_layout(
+    title=f"Modified Duration vs OAS with {deviation_threshold}% Threshold",
+    updatemenus=[{
+        "buttons": buttons,
+        "direction": "down",
+        "showactive": True,
+        "x": 0.17,
+        "y": 1.15
+    }]
+)
+
+# Show figure
+fig.show()
+
+# Print and display outlier report
+outlier_df = pd.DataFrame(outlier_report)
+#if not outlier_df.empty:
+    #print(outlier_df.head(30))
+
+df_above = outlier_df[outlier_df['Above/Below'] == 'Above']
+df_below = outlier_df[outlier_df['Above/Below'] == 'Below']
+
+# Initialize lists to store the rate of change values
+rate_of_change_duradjmod = []
+rate_of_change_oas_bp = []
+rate_of_change = []
+linked_cusip = []
+
+# Define the threshold value
+sage_der_num = 0.83
+
+# Iterate over each row in df_below
+for index_below, row_below in df_below.iterrows():
+    # Initialize temporary lists to store the rate of change for the current row
+    temp_rate_of_change_duradjmod = []
+    temp_rate_of_change_oas_bp = []
+    temp_rate_of_change = []
+    temp_linked_cusip = []
+    
+    # Iterate over each row in df_above
+    for index_above, row_above in df_above.iterrows():
+        # Calculate the rate of change for DURADJMOD and OAS_BP
+        rate_duradjmod = (row_below['DURADJMOD'] - row_above['DURADJMOD']) / row_above['DURADJMOD']
+        rate_oas_bp = (row_below['OAS_BP'] - row_above['OAS_BP']) / row_above['OAS_BP']
+        rate = rate_oas_bp / rate_duradjmod
+        
+        # Append the calculated rates to the temporary lists if the rate is greater than sage_der_num
+        if rate > sage_der_num:
+            temp_rate_of_change_duradjmod.append(rate_duradjmod)
+            temp_rate_of_change_oas_bp.append(rate_oas_bp)
+            temp_rate_of_change.append(rate)
+            temp_linked_cusip.append(row_above['CUSIP'])
+    
+    # Append the temporary lists to the main lists
+    rate_of_change_duradjmod.append(temp_rate_of_change_duradjmod)
+    rate_of_change_oas_bp.append(temp_rate_of_change_oas_bp)
+    rate_of_change.append(temp_rate_of_change)
+    linked_cusip.append(temp_linked_cusip)
+
+# Add the rate of change columns and linked CUSIP column to df_below
+df_below['Rate_of_Change_DURADJMOD'] = rate_of_change_duradjmod
+df_below['Rate_of_Change_OAS_BP'] = rate_of_change_oas_bp
+df_below['Rate_of_Change'] = rate_of_change
+df_below['Linked_CUSIP'] = linked_cusip
+
+for i in range(len(df_below)):
+    if df_below['Linked_CUSIP'].iloc[i]:
+        print(f"For CUSIP {df_below['CUSIP'].iloc[i]}, these are the next best tickers to trade from {df_below['Linked_CUSIP'].iloc[i]}")
+
+
+
+
