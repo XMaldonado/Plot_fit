@@ -1,0 +1,225 @@
+import numpy as np
+import pandas as pd
+from scipy.optimize import curve_fit
+import plotly.graph_objects as go
+import plotly.express as px
+from dash import Dash, dcc, html, dash_table
+from dash.dependencies import Input, Output
+
+# Define the logarithmic function
+def log_func(x, a, b):
+    return a * np.log(x) + b
+
+# Create figure
+fig = go.Figure()
+outlier_report = []
+buttons = []
+ticker_traces = []  # To store trace indices per ticker
+
+# Loop through each ticker
+for ticker in sorted(df_bonds['TICKER'].unique()):
+    df_filtered = df_bonds[df_bonds['TICKER'] == ticker]
+    x = df_filtered['DURADJMOD'].values
+    y = df_filtered['OAS_BP'].values
+
+    if len(x) > 1:
+        params, _ = curve_fit(log_func, x, y)
+        y_fit = log_func(x, *params)
+
+        # Sort x-values for smooth curve
+        sorted_indices = np.argsort(x)
+        x_sorted = x[sorted_indices]
+        y_fit_sorted = y_fit[sorted_indices]
+
+        upper_factor = 1 + (deviation_threshold / 100)
+        lower_factor = 1 - (deviation_threshold / 100)
+        # Compute dynamic deviation limits
+        y_fit_upper = y_fit_sorted * upper_factor
+        y_fit_lower = y_fit_sorted * lower_factor
+
+        # Detect outliers and record deviations
+        for i in range(len(x)):
+            actual = y[i]
+            expected = log_func(x[i], *params)
+            deviation = actual - expected
+
+            if actual > expected * upper_factor or actual < expected * lower_factor:
+                outlier_report.append({
+                    "CUSIP": df_filtered.iloc[i]['CUSIP'],
+                    "TICKER": ticker,
+                    "DURADJMOD": x[i],
+                    "OAS_BP": actual,
+                    "Deviation": round(deviation, 2),
+                    "Above/Below": "Above" if deviation > 0 else "Below",
+                    "Own": df_filtered.iloc[i]['Own?']
+                })
+
+        # Assign colors based on "Own?" status
+        colors = ['blue' if own == 'N' else 'red' for own in df_filtered['Own?']]
+
+        # Scatter plot
+        trace1 = go.Scatter(
+            x=df_filtered['DURADJMOD'],
+            y=df_filtered['OAS_BP'],
+            mode='markers',
+            marker=dict(size=8, color=colors),
+            name=f'{ticker}',
+            visible=False,
+            hovertemplate="<b>CUSIP:</b> %{customdata[0]}<br>"
+                          "<b>Ticker:</b> %{customdata[1]}<br>"
+                          "<b>Duration:</b> %{x}<br>"
+                          "<b>OAS:</b> %{y}<br>"
+                          "<b>Owned:</b> %{customdata[2]}",
+            customdata=df_filtered[['CUSIP', 'TICKER', 'Own?']].values
+        )
+
+        # Log fit line
+        trace2 = go.Scatter(
+            x=x_sorted, y=y_fit_sorted,
+            mode='lines', line=dict(color='black'),
+            name=f'Log Fit: {ticker}',
+            visible=False
+        )
+
+        # Upper Bound (Green Dashed Line)
+        trace3 = go.Scatter(
+            x=x_sorted, y=y_fit_upper,
+            mode='lines', line=dict(color='green', dash='dash'),
+            name=f'{deviation_threshold}% Above Log Fit: {ticker}',
+            visible=False
+        )
+
+        # Lower Bound (Blue Dashed Line)
+        trace4 = go.Scatter(
+            x=x_sorted, y=y_fit_lower,
+            mode='lines', line=dict(color='blue', dash='dash'),
+            name=f'{deviation_threshold}% Below Log Fit: {ticker}',
+            visible=False
+        )
+
+        # Add traces to figure
+        fig.add_trace(trace1)
+        fig.add_trace(trace2)
+        fig.add_trace(trace3)
+        fig.add_trace(trace4)
+
+        # Store trace indices for each ticker
+        ticker_traces.append([len(fig.data) - 4, len(fig.data) - 3, len(fig.data) - 2, len(fig.data) - 1])
+
+# Dropdown logic
+for i, ticker in enumerate(sorted(df_bonds['TICKER'].unique())):
+    button = dict(
+        label=ticker,
+        method="update",
+        args=[{"visible": [False] * len(fig.data)}]
+    )
+    for trace_index in ticker_traces[i]:
+        button["args"][0]["visible"][trace_index] = True
+    buttons.append(button)
+
+# Add dropdown
+fig.update_layout(
+    title=f"Modified Duration vs OAS ({deviation_threshold}% Threshold)",
+    updatemenus=[{
+        "buttons": buttons,
+        "direction": "down",
+        "showactive": True,
+        "x": 0.10,
+        "y": 1.25
+    }]
+)
+
+# Make first ticker visible by default
+for trace_index in ticker_traces[0]:
+    fig.data[trace_index].visible = True
+
+# Create Dash app
+app = Dash(__name__)
+
+app.layout = html.Div([
+    dcc.Graph(id='scatter-plot', figure=fig),
+    dash_table.DataTable(
+        id='outlier-table',
+        columns=[{"name": i, "id": i} for i in outlier_report[0].keys()],
+        data=[],
+        style_table={'overflowX': 'auto'},
+        style_cell={'textAlign': 'left'},
+        style_header={'backgroundColor': 'rgb(230, 230, 230)', 'fontWeight': 'bold'}
+    ),
+    dash_table.DataTable(
+        id='trade-table',
+        columns=[
+            {"name": "CUSIP", "id": "CUSIP"},
+            {"name": "Next Best Tickers to Trade", "id": "Linked_CUSIP"}
+        ],
+        data=[],
+        style_table={'overflowX': 'auto'},
+        style_cell={'textAlign': 'left'},
+        style_header={'backgroundColor': 'rgb(230, 230, 230)', 'fontWeight': 'bold'}
+    )
+])
+
+@app.callback(
+    [Output('outlier-table', 'data'), Output('trade-table', 'data')],
+    [Input('scatter-plot', 'relayoutData')]
+)
+def update_tables(relayoutData):
+    if relayoutData and 'updatemenus[0].active' in relayoutData:
+        active_index = relayoutData['updatemenus[0].active']
+        active_ticker = sorted(df_bonds['TICKER'].unique())[active_index]
+        filtered_report = [report for report in outlier_report if report['TICKER'] == active_ticker]
+        
+        df_below = pd.DataFrame(filtered_report)
+        df_below = df_below[df_below['Above/Below'] == 'Below']
+        
+        # Initialize lists to store the rate of change values
+        rate_of_change_duradjmod = []
+        rate_of_change_oas_bp = []
+        rate_of_change = []
+        linked_cusip = []
+
+        # Define the threshold value
+        sage_der_num = 0.0083
+
+        # Iterate over each row in df_below
+        for index_below, row_below in df_below.iterrows():
+            temp_rate_of_change_duradjmod = []
+            temp_rate_of_change_oas_bp = []
+            temp_rate_of_change = []
+            temp_linked_cusip = []
+            
+            # Iterate over each row in df_above
+            for index_above, row_above in df_above.iterrows():
+                rate_duradjmod = (row_below['DURADJMOD'] - row_above['DURADJMOD']) / row_above['DURADJMOD']
+                rate_oas_bp = (row_below['OAS_BP'] - row_above['OAS_BP']) / row_above['OAS_BP']
+                rate = rate_oas_bp / rate_duradjmod
+                
+                if rate > sage_der_num:
+                    temp_rate_of_change_duradjmod.append(rate_duradjmod)
+                    temp_rate_of_change_oas_bp.append(rate_oas_bp)
+                    temp_rate_of_change.append(rate)
+                    temp_linked_cusip.append(row_above['CUSIP'])
+            
+            rate_of_change_duradjmod.append(temp_rate_of_change_duradjmod)
+            rate_of_change_oas_bp.append(temp_rate_of_change_oas_bp)
+            rate_of_change.append(temp_rate_of_change)
+            linked_cusip.append(temp_linked_cusip)
+
+        df_below['Rate_of_Change_DURADJMOD'] = rate_of_change_duradjmod
+        df_below['Rate_of_Change_OAS_BP'] = rate_of_change_oas_bp
+        df_below['Rate_of_Change'] = rate_of_change
+        df_below['Linked_CUSIP'] = linked_cusip
+
+        df_below = df_below[df_below['Own'] == 'Y']
+
+        trade_data = [
+            {"CUSIP": row['CUSIP'], "Linked_CUSIP": row['Linked_CUSIP']}
+            for _, row in df_below.iterrows() if row['Linked_CUSIP']
+        ]
+
+        return filtered_report, trade_data
+    return [], []
+
+if __name__ == '__main__':
+    app.run_server(debug=True)
+    
