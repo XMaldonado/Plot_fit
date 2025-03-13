@@ -709,3 +709,203 @@ def update_graph(selected_ticker):
 # Run the app
 if __name__ == '__main__':
     app.run_server(debug=True, port=8056)
+
+
+
+
+
+
+import dash
+from dash import dcc, html, Input, Output, dash_table
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from scipy.optimize import curve_fit
+
+# Sample Data (Replace with your Snowflake data)
+np.random.seed(42)
+tickers = ['AAPL', 'GOOGL', 'AMZN', 'MSFT', 'TSLA']
+data = {
+    'TICKER': np.random.choice(tickers, 100),
+    'CUSIP': np.random.choice(['CUSIP001', 'CUSIP002', 'CUSIP003'], 100),
+    'DURADJMOD': np.random.uniform(1, 10, 100),
+    'OAS_BP': np.random.uniform(50, 150, 100),
+    'Own?': np.random.choice(['Y', 'N'], 100)
+}
+df = pd.DataFrame(data)
+
+# Define log function
+def log_func(x, a, b):
+    return a * np.log(x) + b
+
+# Create Dash app
+app = dash.Dash(__name__)
+
+app.layout = html.Div([
+    dcc.Dropdown(
+        id='ticker-dropdown',
+        options=[{'label': ticker, 'value': ticker} for ticker in sorted(df['TICKER'].unique())],
+        value=sorted(df['TICKER'].unique())[0],
+        placeholder="Select or type a ticker...",
+        searchable=True,
+        clearable=True,
+        style={'width': '50%', 'margin-bottom': '20px'}
+    ),
+    
+    dcc.Graph(id='graph'),
+
+    html.Div([
+        html.Div([
+            html.H3("Outlier Report (Owned & Below Line)"),
+            dash_table.DataTable(
+                id='outlier-table',
+                columns=[
+                    {"name": "CUSIP", "id": "CUSIP"},
+                    {"name": "Deviation", "id": "Deviation"},
+                    {"name": "Above/Below", "id": "Above/Below"},
+                    {"name": "Own?", "id": "Own?"}
+                ],
+                data=[],
+                style_table={'overflowX': 'auto'},
+                style_cell={'textAlign': 'left'},
+                style_header={'backgroundColor': 'rgb(230, 230, 230)', 'fontWeight': 'bold'}
+            )
+        ], style={'width': '48%', 'display': 'inline-block'}),
+
+        html.Div([
+            html.H3("Potential Trade Targets (Above Upper Bound)"),
+            dash_table.DataTable(
+                id='trade-table',
+                columns=[
+                    {"name": "CUSIP (Below)", "id": "CUSIP_Below"},
+                    {"name": "Matched CUSIP (Above)", "id": "Matched_CUSIP"},
+                    {"name": "Deviation", "id": "Deviation"},
+                    {"name": "Above/Below", "id": "Above/Below"},
+                    {"name": "Own?", "id": "Own?"}
+                ],
+                data=[],
+                style_table={'overflowX': 'auto'},
+                style_cell={'textAlign': 'left'},
+                style_header={'backgroundColor': 'rgb(230, 230, 230)', 'fontWeight': 'bold'}
+            )
+        ], style={'width': '48%', 'display': 'inline-block', 'float': 'right'})
+    ])
+])
+
+@app.callback(
+    [Output('graph', 'figure'),
+     Output('outlier-table', 'data'),
+     Output('trade-table', 'data')],
+    Input('ticker-dropdown', 'value')
+)
+def update_graph(selected_ticker):
+    if not selected_ticker:
+        return go.Figure(), [], []
+
+    df_filtered = df[df['TICKER'] == selected_ticker]
+    x = df_filtered['DURADJMOD'].values
+    y = df_filtered['OAS_BP'].values
+    
+    if len(x) < 2:
+        return go.Figure(), [], []
+
+    # Fit log function
+    params, _ = curve_fit(log_func, x, y)
+    y_fit = log_func(x, *params)
+
+    # Sort x for smoother line
+    sorted_indices = np.argsort(x)
+    x_sorted, y_fit_sorted = x[sorted_indices], y_fit[sorted_indices]
+
+    # Compute deviation bands
+    deviation_threshold = 5
+    y_fit_upper = y_fit_sorted * (1 + deviation_threshold / 100)
+    y_fit_lower = y_fit_sorted * (1 - deviation_threshold / 100)
+
+    # Assign colors based on ownership
+    colors = ['blue' if own == 'N' else 'red' for own in df_filtered['Own?']]
+
+    # Create figure
+    fig = go.Figure()
+
+    # ✅ Fix trace 0 for TICKER label
+    fig.add_trace(go.Scatter(
+        x=df_filtered['DURADJMOD'],
+        y=df_filtered['OAS_BP'],
+        mode='markers',
+        marker=dict(size=8, color=colors),
+        name=f"{selected_ticker} Bonds",
+        hovertemplate="<b>CUSIP:</b> %{customdata[0]}<br>"
+                      "<b>Ticker:</b> %{customdata[1]}<br>"
+                      "<b>Duration:</b> %{x}<br>"
+                      "<b>OAS:</b> %{y}<br>"
+                      "<b>Owned:</b> %{customdata[2]}",
+        customdata=df_filtered[['CUSIP', 'TICKER', 'Own?']]
+    ))
+
+    # ➡️ Separate traces for log fit and bounds ✅
+    fig.add_trace(go.Scatter(
+        x=x_sorted, y=y_fit_sorted,
+        mode='lines', line=dict(color='black'),
+        name="Log Fit"
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=x_sorted, y=y_fit_upper,
+        mode='lines', line=dict(color='green', dash='dash'),
+        name=f"{deviation_threshold}% Above Log Fit"
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=x_sorted, y=y_fit_lower,
+        mode='lines', line=dict(color='blue', dash='dash'),
+        name=f"{deviation_threshold}% Below Log Fit"
+    ))
+
+    # ✅ Fix SettingWithCopyWarning + Empty DataFrame Issue
+    df_below = df_filtered[
+        (df_filtered['Own?'] == 'Y') &
+        (df_filtered['OAS_BP'] < log_func(df_filtered['DURADJMOD'], *params) * (1 - deviation_threshold / 100))
+    ].copy()
+
+    if not df_below.empty:
+        df_below.loc[:, 'Deviation'] = df_below['OAS_BP'] - log_func(df_below['DURADJMOD'], *params)
+        df_below.loc[:, 'Above/Below'] = 'Below'
+
+    df_above = df_filtered[
+        (df_filtered['Own?'] == 'N') &
+        (df_filtered['OAS_BP'] > log_func(df_filtered['DURADJMOD'], *params) * (1 + deviation_threshold / 100))
+    ].copy()
+
+    if not df_above.empty:
+        df_above.loc[:, 'Deviation'] = df_above['OAS_BP'] - log_func(df_above['DURADJMOD'], *params)
+        df_above.loc[:, 'Above/Below'] = 'Above'
+
+    # ✅ Trade matching logic
+    trade_data = []
+    for _, row_below in df_below.iterrows():
+        for _, row_above in df_above.iterrows():
+            if row_above['DURADJMOD'] > row_below['DURADJMOD']:
+                trade_data.append({
+                    "CUSIP_Below": row_below['CUSIP'],
+                    "Matched_CUSIP": row_above['CUSIP'],
+                    "Deviation": round(row_above['Deviation'], 2),
+                    "Above/Below": row_above['Above/Below'],
+                    "Own?": row_above['Own?']
+                })
+
+    # ✅ Restore clean legend
+    fig.update_layout(
+        legend=dict(
+            orientation="h",
+            x=0,
+            y=-0.3
+        )
+    )
+
+    return fig, df_below.to_dict('records'), trade_data
+
+# Run the app
+if __name__ == '__main__':
+    app.run_server(debug=True, port=8057)
+
