@@ -1,3 +1,71 @@
+@app.callback(
+    [Output('graph', 'figure'),
+     Output('outlier-table', 'data'),
+     Output('trade-table', 'data')],
+    Input('ticker-dropdown', 'value')
+)
+def update_graph(selected_ticker):
+    if not selected_ticker:
+        return go.Figure(), [], []
+
+    df_filtered = df[df['TICKER'] == selected_ticker]
+    x = df_filtered['DURADJMOD'].values
+    y = df_filtered['OAS_BP'].values
+
+    if len(x) < 2:
+        return go.Figure(), [], []
+
+    params, _ = curve_fit(log_func, x, y)
+    y_fit = log_func(x, *params)
+
+    # ✅ Restore detailed hover info
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=x, y=y,
+        mode='markers',
+        marker=dict(size=8),
+        hovertemplate="<b>ID:</b> %{customdata[3]}<br>"
+                      "<b>CUSIP:</b> %{customdata[0]}<br>"
+                      "<b>Duration:</b> %{x}<br>"
+                      "<b>OAS:</b> %{y}<br>",
+        customdata=df_filtered[['CUSIP', 'TICKER', 'Own?', 'ID']]
+    ))
+
+    # ✅ Add log fit line
+    sorted_indices = np.argsort(x)
+    fig.add_trace(go.Scatter(
+        x=x[sorted_indices], y=y_fit[sorted_indices],
+        mode='lines',
+        line=dict(color='black'),
+        name="Log Fit"
+    ))
+
+    # ✅ Add title and axis labels
+    fig.update_layout(
+        title=f"{selected_ticker} Bonds - OAS vs Duration",
+        xaxis=dict(
+            title="Duration Adjusted Modified (DURADJMOD)",
+            showgrid=True
+        ),
+        yaxis=dict(
+            title="OAS (Basis Points)",
+            showgrid=True
+        ),
+        legend=dict(
+            orientation="h",
+            x=0,
+            y=-0.3
+        )
+    )
+
+    return fig, [], []
+
+
+
+
+
+
+
 import dash
 from dash import dcc, html, Input, Output, dash_table
 import plotly.graph_objs as go
