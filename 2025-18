@@ -1,0 +1,179 @@
+import dash
+from dash import dcc, html, Input, Output, dash_table
+import plotly.graph_objs as go
+import numpy as np
+import pandas as pd
+from scipy.optimize import curve_fit
+
+# Sample DataFrame
+df = df_bonds
+
+# Define log function
+def log_func(x, a, b):
+    return a * np.log(x) + b
+
+# Function to generate trade data for all tickers
+def generate_trade_data_tot(df, deviation_threshold):
+    trade_data_tot = []
+    for ticker in df['TICKER'].unique():
+        df_ticker = df[df['TICKER'] == ticker]
+        x_ticker = df_ticker['DURADJMOD'].values
+        y_ticker = df_ticker['OAS_BP'].values
+
+        if len(x_ticker) < 2:
+            continue
+        
+        params_ticker, _ = curve_fit(log_func, x_ticker, y_ticker)
+        
+        df_below_ticker = df_ticker[
+            (df_ticker['Own?'] == 'Y') &
+            (df_ticker['OAS_BP'] < log_func(df_ticker['DURADJMOD'], *params_ticker) * (1 - deviation_threshold / 100))
+        ].copy()
+
+        if not df_below_ticker.empty:
+            df_below_ticker.loc[:, 'Deviation'] = round(df_below_ticker['OAS_BP'] - log_func(df_below_ticker['DURADJMOD'], *params_ticker), 2)
+            df_below_ticker.loc[:, 'Above/Below'] = 'Below'
+
+        df_above_ticker = df_ticker[
+            (df_ticker['Own?'] == 'N') &
+            (df_ticker['OAS_BP'] > log_func(df_ticker['DURADJMOD'], *params_ticker) * (1 + deviation_threshold / 100))
+        ].copy()
+
+        if not df_above_ticker.empty:
+            df_above_ticker.loc[:, 'Deviation'] = round(df_above_ticker['OAS_BP'] - log_func(df_above_ticker['DURADJMOD'], *params_ticker), 2)
+            df_above_ticker.loc[:, 'Above/Below'] = 'Above'
+
+        for _, row_below in df_below_ticker.iterrows():
+            for _, row_above in df_above_ticker.iterrows():
+                if row_above['DURADJMOD'] > row_below['DURADJMOD']:
+                    trade_data_tot.append({
+                        "CUSIP_Below": row_below['CUSIP'],
+                        "ID_Below": row_below['ID'],
+                        "Matched_CUSIP": row_above['CUSIP'],
+                        "Matched_ID": row_above['ID'],
+                        "Ratio_oas_dur": round(((row_above['OAS_BP'] - row_below['OAS_BP']) / 
+                                                (row_above['DURADJMOD'] - row_below['DURADJMOD'])), 2),
+                        "Deviation": round(row_above['Deviation'], 2),
+                        "Deviation_diff": round(row_above['Deviation'] - row_below['Deviation'], 2),
+                        "OAS_diff": round(row_above['OAS_BP'] - row_below['OAS_BP'], 2),
+                        "DURATION_diff": round(row_above['DURADJMOD'] - row_below['DURADJMOD'], 2)
+                    })
+    return trade_data_tot
+
+# ✅ Compute trade data for all tickers once at startup
+deviation_threshold = 5
+trade_data_tot = generate_trade_data_tot(df, deviation_threshold)
+
+# Create Dash app
+app = dash.Dash(__name__)
+
+app.layout = html.Div([
+    dcc.Dropdown(
+        id='ticker-dropdown',
+        options=[{'label': ticker, 'value': ticker} for ticker in sorted(df['TICKER'].unique())],
+        value=sorted(df['TICKER'].unique())[0],
+        searchable=True,
+        clearable=True,
+        style={'width': '50%', 'margin-bottom': '20px'}
+    ),
+
+    dcc.Graph(id='graph'),
+
+    # Outlier Report
+    html.Div([
+        html.H3("Outlier Report (Owned & Below Line)"),
+        dash_table.DataTable(
+            id='outlier-table',
+            columns=[
+                {"name": "ID", "id": "ID"},
+                {"name": "CUSIP", "id": "CUSIP"},
+                {"name": "Deviation", "id": "Deviation"}
+            ],
+            data=[],
+            style_table={'overflowX': 'auto'},
+            style_cell={'textAlign': 'left'},
+            style_header={'backgroundColor': '#f2f2f2', 'fontWeight': 'bold'}
+        )
+    ]),
+
+    # Trade Table
+    html.Div([
+        html.H3("Potential Trade Targets (Above Upper Bound)"),
+        dash_table.DataTable(
+            id='trade-table',
+            columns=[
+                {"name": "Owned CUSIP", "id": "CUSIP_Below"},
+                {"name": "Owned ID", "id": "ID_Below"},
+                {"name": "Matched ID", "id": "Matched_ID"},
+                {"name": "Matched CUSIP", "id": "Matched_CUSIP"},
+                {"name": "Ratio", "id": "Ratio_oas_dur"},
+                {"name": "Deviation", "id": "Deviation"},
+                {"name": "Dev Diff", "id": "Deviation_diff"},
+                {"name": "OAS Diff", "id": "OAS_diff"},
+                {"name": "Duration Diff", "id": "DURATION_diff"}
+            ],
+            data=[],
+            style_table={'overflowX': 'auto'},
+            style_cell={'textAlign': 'left'},
+            style_header={'backgroundColor': '#f2f2f2', 'fontWeight': 'bold'}
+        )
+    ]),
+
+    # All Trade Targets Table
+    html.Div([
+        html.H3("All Trade Targets (All Tickers)"),
+        dash_table.DataTable(
+            id='trade-table-tot',
+            columns=[
+                {"name": "Owned CUSIP", "id": "CUSIP_Below"},
+                {"name": "Owned ID", "id": "ID_Below"},
+                {"name": "Matched ID", "id": "Matched_ID"},
+                {"name": "Matched CUSIP", "id": "Matched_CUSIP"},
+                {"name": "Ratio", "id": "Ratio_oas_dur"},
+                {"name": "Deviation", "id": "Deviation"},
+                {"name": "Dev Diff", "id": "Deviation_diff"},
+                {"name": "OAS Diff", "id": "OAS_diff"},
+                {"name": "Duration Diff", "id": "DURATION_diff"}
+            ],
+            data=trade_data_tot
+        )
+    ])
+])
+
+@app.callback(
+    [Output('graph', 'figure'),
+     Output('outlier-table', 'data'),
+     Output('trade-table', 'data')],
+    Input('ticker-dropdown', 'value')
+)
+def update_graph(selected_ticker):
+    if not selected_ticker:
+        return go.Figure(), [], []
+
+    df_filtered = df[df['TICKER'] == selected_ticker]
+    x = df_filtered['DURADJMOD'].values
+    y = df_filtered['OAS_BP'].values
+
+    if len(x) < 2:
+        return go.Figure(), [], []
+
+    params, _ = curve_fit(log_func, x, y)
+    y_fit = log_func(x, *params)
+
+    # ✅ Restore detailed hover info
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=x, y=y,
+        mode='markers',
+        marker=dict(size=8),
+        hovertemplate="<b>ID:</b> %{customdata[3]}<br>"
+                      "<b>CUSIP:</b> %{customdata[0]}<br>"
+                      "<b>Duration:</b> %{x}<br>"
+                      "<b>OAS:</b> %{y}<br>",
+        customdata=df_filtered[['CUSIP', 'TICKER', 'Own?', 'ID']]
+    ))
+
+    return fig, [], []
+
+if __name__ == '__main__':
+    app.run_server(debug=True, port=8050)
