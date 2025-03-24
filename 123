@@ -1,0 +1,173 @@
+import numpy as np
+import pandas as pd
+from scipy.optimize import curve_fit
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+import plotly.graph_objects as go
+from ipywidgets import widgets
+from IPython.display import display
+import snowflake.connector
+import dash
+from dash import dcc, html, Input, Output, dash_table
+
+
+# Set deviation threshold (change this value once)
+deviation_threshold = 5  # Change to any percentage you want
+
+###DATA EXTRACTION FROM SNOWFLAKE
+conn = snowflake.connector.connect(
+    user='SAGESNOW',
+    password='V2^cHfBnQQdbx28duWx*d',
+    account='ESA97740.east-us-2.azure',
+    warehouse='COMPUTE_WH',
+    database='SAGENEXTGEN',
+    schema='PUBLIC'
+)
+cursor = conn.cursor()
+
+# Fetch Bloomberg data
+query1 = """
+    SELECT CUSIP, TICKER, DURADJMOD, OAS_BP, QUALITYE, COUPON, MATURDATE, ENTRY_DAY
+    FROM TRADERS.BLOOMBERG_IMPORTS.BLOOMBERG_IMPORT_BOND
+    WHERE ISSRCLSL1 = 'CORPORATES'
+    AND DURADJMOD > 1.0
+    AND OUTSTANDE > 299999
+    AND TYPPLACMT = 'SEC'
+    AND TYPSUBORD = 'SRNOTES'
+    AND (ENTRY_DAY = '2025-03-19')
+"""
+
+query2 = """
+    SELECT CUSIP, TICKER, DURADJMOD, OAS_BP, QUALITYE, COUPON, MATURDATE, ENTRY_DAY
+    FROM TRADERS.BLOOMBERG_IMPORTS.BLOOMBERG_IMPORT_BOND
+    WHERE ISSRCLSL1 = 'CORPORATES'
+    AND DURADJMOD > 1.0
+    AND OUTSTANDE > 299999
+    AND TYPPLACMT = 'SEC'
+    AND TYPSUBORD = 'SRNOTES'
+"""
+query = """
+select * from TRADERS.BLOOMBERG_IMPORTS.DAILY_CURVE_IG_DATA
+"""
+cursor.execute(query2)
+df_bonds = cursor.fetch_pandas_all()
+cursor.close()
+conn.close()
+df_bonds['TICKER'] = df_bonds['TICKER'].astype(str)
+df_bonds['COUPON'] = df_bonds['COUPON'].astype(str)
+df_bonds['MATURDATE'] = df_bonds['MATURDATE'].astype(str)
+df_bonds['MATURDATE'] = pd.to_datetime(df_bonds['MATURDATE'], format='%Y%m%d').dt.strftime('%m/%d/%Y')
+df_bonds.insert(3, 'ID', df_bonds['TICKER'] + ' ' + df_bonds['COUPON'] + ' ' + df_bonds['MATURDATE'])
+
+
+# Filter and clean data
+df_bonds['DURADJMOD'] = pd.to_numeric(df_bonds['DURADJMOD'], errors='coerce')
+df_bonds['OAS_BP'] = pd.to_numeric(df_bonds['OAS_BP'], errors='coerce')
+df_bonds = df_bonds.dropna(subset=['DURADJMOD', 'OAS_BP'])
+
+# Remove low frequency tickers
+min_count = 5
+df_bonds = df_bonds[df_bonds['TICKER'].map(df_bonds['TICKER'].value_counts()) >= min_count]
+df_bonds.head()
+
+
+grouped_df = df_bonds.groupby(['ENTRY_DAY'])
+
+
+
+import pandas as pd
+import numpy as np
+from scipy.optimize import curve_fit
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+
+# Define log function
+def log_func(x, a, b):
+    return a * np.log(x) + b
+
+# Define Nelson-Siegel function
+def ns_func(x, beta0, beta1, beta2, lambda1):
+    term1 = beta0
+    term2 = beta1 * (1 - np.exp(-x / lambda1)) / (x / lambda1)
+    term3 = beta2 * ((1 - np.exp(-x / lambda1)) / (x / lambda1) - np.exp(-x / lambda1))
+    return term1 + term2 + term3
+
+# Define Nelson-Siegel-Svensson function
+def nss_func(x, beta0, beta1, beta2, beta3, lambda1, lambda2):
+    term1 = beta0
+    term2 = beta1 * (1 - np.exp(-x / lambda1)) / (x / lambda1)
+    term3 = beta2 * ((1 - np.exp(-x / lambda1)) / (x / lambda1) - np.exp(-x / lambda1))
+    term4 = beta3 * ((1 - np.exp(-x / lambda2)) / (x / lambda2) - np.exp(-x / lambda2))
+    return term1 + term2 + term3 + term4
+
+# Fit Log function
+def fit_log_curve(x, y):
+    params, _ = curve_fit(log_func, x, y)
+    y_fit = log_func(x, *params)
+    return params, y_fit
+
+# Fit Nelson-Siegel curve
+def fit_ns_curve(x, y):
+    try:
+        initial_params = [0.01, -0.01, 0.01, 1.0]
+        params, _ = curve_fit(ns_func, x, y, p0=initial_params, maxfev=10000)
+        y_fit = ns_func(x, *params)
+        return params, y_fit
+    except Exception as e:
+        print(f"Error fitting NS curve: {e}")
+        return None, None
+
+# Fit NSS curve
+def fit_nss_curve(x, y):
+    try:
+        initial_params = [0.01, -0.01, 0.01, 0.01, 1.0, 1.0]
+        params, _ = curve_fit(nss_func, x, y, p0=initial_params, maxfev=10000)
+        y_fit = nss_func(x, *params)
+        return params, y_fit
+    except Exception as e:
+        print(f"Error fitting NSS curve: {e}")
+        return None, None
+
+# Compute model fit statistics
+def compute_model_stats(y_true, y_pred):
+    r2 = r2_score(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    return r2, mse, mae, rmse
+
+# Function to update plot based on selected ticker and date
+def update_plot(ticker):
+    df_owned1 = df_bonds[df_bonds['TICKER'] == ticker]
+    x_ticker123 = df_owned1['DURADJMOD'].values
+    y_ticker123 = df_owned1['OAS_BP'].values
+
+    # Sort the data based on x values
+    sorted_indices = np.argsort(x_ticker123)
+    x_sorted = x_ticker123[sorted_indices]
+    y_sorted = y_ticker123[sorted_indices]
+
+    # Fit curves
+    log_params, y_log_fit = fit_log_curve(x_sorted, y_sorted)
+    ns_params, y_ns_fit = fit_ns_curve(x_sorted, y_sorted)
+    nss_params, y_nss_fit = fit_nss_curve(x_sorted, y_sorted)
+
+    # Compute stats
+    log_stats = compute_model_stats(y_sorted, y_log_fit)
+    ns_stats = compute_model_stats(y_sorted, y_ns_fit) if y_ns_fit is not None else (None, None, None, None)
+    nss_stats = compute_model_stats(y_sorted, y_nss_fit) if y_nss_fit is not None else (None, None, None, None)
+
+    # Store results in a dataframe
+    results_df = pd.DataFrame({
+        'Model': ['Log', 'Nelson-Siegel', 'Nelson-Siegel-Svensson'],
+        'R²': [log_stats[0], ns_stats[0], nss_stats[0]],
+        'MSE': [log_stats[1], ns_stats[1], nss_stats[1]],
+        'MAE': [log_stats[2], ns_stats[2], nss_stats[2]],
+        'RMSE': [log_stats[3], ns_stats[3], nss_stats[3]]
+    })
+
+    return results_df
+
+# Example usage with a sample ticker and date
+ticker_example = 'HCA'
+results_df_example = update_plot(ticker_example)
+
+print(results_df_example)
