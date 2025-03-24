@@ -1,0 +1,141 @@
+import numpy as np
+import pandas as pd
+from scipy.optimize import curve_fit
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+import os
+
+# Define log function
+def log_func(x, a, b):
+    return a * np.log(x) + b
+
+# Define Nelson-Siegel function
+def ns_func(x, beta0, beta1, beta2, lambda1):
+    term1 = beta0
+    term2 = beta1 * (1 - np.exp(-x / lambda1)) / (x / lambda1)
+    term3 = beta2 * ((1 - np.exp(-x / lambda1)) / (x / lambda1) - np.exp(-x / lambda1))
+    return term1 + term2 + term3
+
+# Define Nelson-Siegel-Svensson function
+def nss_func(x, beta0, beta1, beta2, beta3, lambda1, lambda2):
+    term1 = beta0
+    term2 = beta1 * (1 - np.exp(-x / lambda1)) / (x / lambda1)
+    term3 = beta2 * ((1 - np.exp(-x / lambda1)) / (x / lambda1) - np.exp(-x / lambda1))
+    term4 = beta3 * ((1 - np.exp(-x / lambda2)) / (x / lambda2) - np.exp(-x / lambda2))
+    return term1 + term2 + term3 + term4
+
+# Fit Log function
+def fit_log_curve(x, y):
+    try:
+        params, _ = curve_fit(log_func, x, y)
+        y_fit = log_func(x, *params)
+        return params, y_fit
+    except Exception as e:
+        print(f"Error fitting log curve: {e}")
+        return None, None
+
+# Fit Nelson-Siegel curve
+def fit_ns_curve(x, y):
+    try:
+        initial_params = [0.01, -0.01, 0.01, 1.0]
+        params, _ = curve_fit(ns_func, x, y, p0=initial_params, maxfev=10000)
+        y_fit = ns_func(x, *params)
+        return params, y_fit
+    except Exception as e:
+        print(f"Error fitting NS curve: {e}")
+        return None, None
+
+# Fit NSS curve
+def fit_nss_curve(x, y):
+    try:
+        initial_params = [0.01, -0.01, 0.01, 0.01, 1.0, 1.0]
+        params, _ = curve_fit(nss_func, x, y, p0=initial_params, maxfev=10000)
+        y_fit = nss_func(x, *params)
+        return params, y_fit
+    except Exception as e:
+        print(f"Error fitting NSS curve: {e}")
+        return None, None
+
+# Compute model fit statistics
+def compute_model_stats(y_true, y_pred):
+    r2 = r2_score(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    return r2, mse, mae, rmse
+
+# Create an empty list to store results
+all_results = []
+
+# Loop through each ticker and entry date
+for ticker, group in df_bonds.groupby(['TICKER', 'ENTRY_DAY']):
+    ticker_name = ticker[0]
+    entry_date = ticker[1]
+    x = group['DURADJMOD'].values
+    y = group['OAS_BP'].values
+    
+    if len(x) < 2:
+        continue
+    
+    # Sort the data for fitting
+    sorted_indices = np.argsort(x)
+    x_sorted = x[sorted_indices]
+    y_sorted = y[sorted_indices]
+    
+    # Fit curves
+    log_params, y_log_fit = fit_log_curve(x_sorted, y_sorted)
+    ns_params, y_ns_fit = fit_ns_curve(x_sorted, y_sorted)
+    nss_params, y_nss_fit = fit_nss_curve(x_sorted, y_sorted)
+    
+    # Compute stats
+    log_stats = compute_model_stats(y_sorted, y_log_fit) if y_log_fit is not None else (None, None, None, None)
+    ns_stats = compute_model_stats(y_sorted, y_ns_fit) if y_ns_fit is not None else (None, None, None, None)
+    nss_stats = compute_model_stats(y_sorted, y_nss_fit) if y_nss_fit is not None else (None, None, None, None)
+    
+    # Count the number of bonds for the ticker and date
+    count = len(group)
+    
+    # Append to results
+    all_results.append({
+        'Ticker': ticker_name,
+        'Entry Date': entry_date,
+        'Count': count,
+        'Model': 'Log',
+        'R²': log_stats[0],
+        'MSE': log_stats[1],
+        'MAE': log_stats[2],
+        'RMSE': log_stats[3]
+    })
+    
+    all_results.append({
+        'Ticker': ticker_name,
+        'Entry Date': entry_date,
+        'Count': count,
+        'Model': 'Nelson-Siegel',
+        'R²': ns_stats[0],
+        'MSE': ns_stats[1],
+        'MAE': ns_stats[2],
+        'RMSE': ns_stats[3]
+    })
+    
+    all_results.append({
+        'Ticker': ticker_name,
+        'Entry Date': entry_date,
+        'Count': count,
+        'Model': 'Nelson-Siegel-Svensson',
+        'R²': nss_stats[0],
+        'MSE': nss_stats[1],
+        'MAE': nss_stats[2],
+        'RMSE': nss_stats[3]
+    })
+
+# Convert results to DataFrame
+results_df = pd.DataFrame(all_results)
+
+# Save results to CSV
+output_file = 'bond_curve_fit_results.csv'
+results_df.to_csv(output_file, index=False)
+
+print(f"Results saved to '{output_file}'")
+
+# Show a preview of the results
+print(results_df.head(10))
