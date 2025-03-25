@@ -1,0 +1,406 @@
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from scipy.optimize import curve_fit
+import snowflake.connector
+import dash
+from dash import dcc, html, Input, Output, dash_table
+
+# Set deviation threshold (change this value once)
+deviation_threshold = 5  # Change to any percentage you want
+
+###DATA EXTRACTION FROM SNOWFLAKE
+conn = snowflake.connector.connect(
+    user='SAGESNOW',
+    password='V2^cHfBnQQdbx28duWx*d',
+    account='ESA97740.east-us-2.azure',
+    warehouse='COMPUTE_WH',
+    database='SAGENEXTGEN',
+    schema='PUBLIC'
+)
+cursor = conn.cursor()
+
+# Fetch Bloomberg data
+
+query = """
+select * from TRADERS.BLOOMBERG_IMPORTS.DAILY_CURVE_IG_DATA
+"""
+cursor.execute(query)
+df_bonds = cursor.fetch_pandas_all()
+cursor.close()
+conn.close()
+df_bonds['TICKER'] = df_bonds['TICKER'].astype(str)
+df_bonds['COUPON'] = df_bonds['COUPON'].astype(str)
+df_bonds['MATURDATE'] = df_bonds['MATURDATE'].astype(str)
+df_bonds['MATURDATE'] = pd.to_datetime(df_bonds['MATURDATE'], format='%Y%m%d').dt.strftime('%m/%d/%Y')
+df_bonds.insert(3, 'ID', df_bonds['TICKER'] + ' ' + df_bonds['COUPON'] + ' ' + df_bonds['MATURDATE'])
+
+
+# Filter and clean data
+df_bonds['DURADJMOD'] = pd.to_numeric(df_bonds['DURADJMOD'], errors='coerce')
+df_bonds['OAS_BP'] = pd.to_numeric(df_bonds['OAS_BP'], errors='coerce')
+df_bonds = df_bonds.dropna(subset=['DURADJMOD', 'OAS_BP'])
+
+# Remove low frequency tickers
+min_count = 5
+df_bonds = df_bonds[df_bonds['TICKER'].map(df_bonds['TICKER'].value_counts()) >= min_count]
+#df_bonds.head()
+
+
+
+# Establish connection
+conn = snowflake.connector.connect(
+    user='SAGESNOW',
+    password='V2^cHfBnQQdbx28duWx*d',
+    account='ESA97740.east-us-2.azure',
+    warehouse='COMPUTE_WH',
+    database='TRADERS',
+    schema='PUBLIC'
+)
+
+# Create a cursor object
+cursor = conn.cursor()
+
+# Fetch position data
+query_pos = """
+SELECT fm.entity_id, fm.effective_date, trim(sd.ticker) as TICK, left(sd.SECURITY_ID, 8) as CUSIP, sd.*, pd.*
+FROM EAGLE.datamartdbo_fund_summary fs
+INNER JOIN EAGLE.datamartdbo_fund_master fm ON fm.dmart_fund_id = fs.dmart_fund_id
+INNER JOIN EAGLE.datamartdbo_position_details pd ON pd.dmart_fund_id = fs.dmart_fund_id
+INNER JOIN EAGLE.rulesdbo_entity e ON e.entity_ID = fm.entity_ID
+INNER JOIN EAGLE.datamartdbo_security_details sd ON sd.security_alias = pd.security_alias AND sd.effective_date = fm.effective_date
+WHERE sd.security_type = 'Corporate'
+AND e.entity_type = 'PORT'
+AND fm.effective_date = DATEADD(day, -1, CURRENT_DATE())
+"""
+cursor.execute(query_pos)
+
+# Fetch all rows
+all_rows = cursor.fetchall()
+
+# Get column names
+columns = [desc[0] for desc in cursor.description]
+
+# Create a DataFrame
+df_positions = pd.DataFrame(all_rows, columns=columns)
+
+# Close the cursor and connection
+cursor.close()
+conn.close()
+
+# Ensure unique column names
+df_positions.columns = [f"{col}_{i}" if df_positions.columns.duplicated()[i] else col for i, col in enumerate(df_positions.columns)]
+
+# Group by 'CUSIP' and 'TICK' and sum 'SHARE_PAR_VALUE'
+df_positions = df_positions.groupby(['CUSIP', 'TICK'])['SHARE_PAR_VALUE'].sum().reset_index()
+
+# Convert 'SHARE_PAR_VALUE' to numeric
+df_positions['SHARE_PAR_VALUE'] = pd.to_numeric(df_positions['SHARE_PAR_VALUE'], errors='coerce')
+
+# Filter rows where 'SHARE_PAR_VALUE' is greater than 2000000
+#df_positions = df_positions[df_positions['SHARE_PAR_VALUE'] > 2000000]
+df_positions = df_positions[df_positions['SHARE_PAR_VALUE'] > 3000000]
+# Display the DataFrame
+print(df_positions)
+
+
+# Merge ownership info
+df_bonds = df_bonds.merge(df_positions[['CUSIP']], on='CUSIP', how='left', indicator=True)
+df_bonds['Own?'] = df_bonds['_merge'].map({'both': 'Y', 'left_only': 'N', 'right_only': 'N'})
+print(df_bonds['Own?'].value_counts())
+#df_bonds.head()
+
+
+df_owned1 = df_bonds[df_bonds['Own?'] == 'Y']
+print(df_owned1['ID'])
+
+
+
+
+
+df = df_bonds
+
+# Define Nelson-Siegel function
+def ns_func(x, beta0, beta1, beta2, lambda1):
+    term1 = beta0
+    term2 = beta1 * (1 - np.exp(-x / lambda1)) / (x / lambda1)
+    term3 = beta2 * ((1 - np.exp(-x / lambda1)) / (x / lambda1) - np.exp(-x / lambda1))
+    return term1 + term2 + term3
+
+# Fit Nelson-Siegel curve
+def fit_ns_curve(x, y):
+    try:
+        initial_params = [0.01, -0.01, 0.01, 1.0]
+        params, _ = curve_fit(ns_func, x, y, p0=initial_params, maxfev=5000)
+        y_fit = ns_func(x, *params)
+        return params, y_fit
+    except Exception as e:
+        print(f"Error fitting NS curve: {e}")
+        return None, None
+
+def generate_trade_data_tot(df, deviation_threshold):
+    trade_data_tot = []
+    for ticker in sorted(df['TICKER'].unique()):
+        df_ticker = df[df['TICKER'] == ticker]
+        x_ticker = df_ticker['DURADJMOD'].values
+        y_ticker = df_ticker['OAS_BP'].values
+
+        if len(x_ticker) < 2:
+            continue
+        params_ticker, _ = fit_ns_curve(x_ticker, y_ticker)
+        df_below_ticker = df_ticker[
+            (df_ticker['Own?'] == 'Y') &
+            (df_ticker['OAS_BP'] < ns_func(df_ticker['DURADJMOD'], *params_ticker) * (1 - deviation_threshold / 100))
+        ].copy()
+
+        if not df_below_ticker.empty:
+            df_below_ticker.loc[:, 'Deviation'] = round(df_below_ticker['OAS_BP'] - ns_func(df_below_ticker['DURADJMOD'], *params_ticker), 2)
+            df_below_ticker.loc[:, 'Above/Below'] = 'Below'
+
+        df_above_ticker = df_ticker[
+            (df_ticker['Own?'] == 'N') &
+            (df_ticker['OAS_BP'] > ns_func(df_ticker['DURADJMOD'], *params_ticker) * (1 + deviation_threshold / 100))
+        ].copy()
+
+        if not df_above_ticker.empty:
+            df_above_ticker.loc[:, 'Deviation'] = round(df_above_ticker['OAS_BP'] - ns_func(df_above_ticker['DURADJMOD'], *params_ticker), 2)
+            df_above_ticker.loc[:, 'Above/Below'] = 'Above'
+    
+        for _, row_below in df_below_ticker.iterrows():
+            for _, row_above in df_above_ticker.iterrows():
+                if row_above['DURADJMOD'] > row_below['DURADJMOD']:
+                    ratio_oas_dur = round(((row_above['OAS_BP'] - row_below['OAS_BP']) / (row_above['DURADJMOD'] - row_below['DURADJMOD'])), 2)
+                    if ratio_oas_dur > 10:
+                        trade_data_tot.append({
+                            "CUSIP_Below1": row_below['CUSIP'],
+                            "ID_Below1": row_below['ID'],
+                            "Matched_CUSIP1": row_above['CUSIP'],
+                            "Matched_ID1": row_above['ID'],
+                            "Ratio_oas_dur1": ratio_oas_dur,
+                            "Deviation1": round(row_above['Deviation'], 2),
+                            "Deviation_diff1": round(row_above['Deviation'] - row_below['Deviation'], 2),
+                            "OAS_diff1": round(row_above['OAS_BP'] - row_below['OAS_BP'], 2),
+                            "DURATION_diff1": round(row_above['DURADJMOD'] - row_below['DURADJMOD'], 2),
+                            "Above/Below1": row_above['Above/Below'],
+                            "Own?1": row_above['Own?']
+                        })
+    
+                    trade_data_tot = sorted(trade_data_tot, key=lambda x: (x['ID_Below1'], x['Ratio_oas_dur1']), reverse=False)
+    return trade_data_tot
+
+trade_data_tot = generate_trade_data_tot(df, deviation_threshold)
+
+# Create Dash app
+app = dash.Dash(__name__)
+app.layout = html.Div([
+    dcc.Dropdown(
+        id='ticker-dropdown',
+        options=[{'label': ticker, 'value': ticker} for ticker in sorted(df['TICKER'].unique())],
+        value=sorted(df['TICKER'].unique())[0],
+        placeholder="Select or type a ticker...",
+        searchable=True,
+        clearable=True,
+        style={'width': '50%', 'margin-bottom': '20px'}
+    ),
+    
+    dcc.Graph(id='graph'),
+
+    html.Div([
+        html.Div([
+            html.H3("Outlier Report (Owned & Below Line)"),
+            dash_table.DataTable(
+                id='outlier-table',
+                columns=[
+                    {"name": "ID", "id": "ID"},
+                    {"name": "CUSIP", "id": "CUSIP"},
+                    {"name": "Deviation", "id": "Deviation"}
+                ],
+                data=[],
+                style_table={'overflowX': 'auto'},
+                style_cell={'textAlign': 'left'},
+                style_header={'backgroundColor': 'rgb(230, 230, 230)', 'fontWeight': 'bold'}
+            )
+        ], style={'width': '30%', 'display': 'inline-block'}),
+
+        html.Div([
+            html.H3("Potential Trade Targets (Above Upper Bound)"),
+            dash_table.DataTable(
+                id='trade-table',
+                columns=[
+                    {"name": "Owned CUSIP", "id": "CUSIP_Below"},
+                    {"name": "Owned ID", "id": "ID_Below"},
+                    {"name": "Matched ID", "id": "Matched_ID"},
+                    {"name": "Matched CUSIP", "id": "Matched_CUSIP"},
+                    {"name": "Ratio", "id": "Ratio_oas_dur"},
+                    {"name": "Deviation", "id": "Deviation"},
+                    {"name": "Dev Diff", "id": "Deviation_diff"},
+                    {"name": "OAS Diff", "id": "OAS_diff"},
+                    {"name": "Duration Diff", "id": "DURATION_diff"}
+                ],
+                data=[],
+                style_table={'overflowX': 'auto'},
+                style_cell={'textAlign': 'left'},
+                style_header={'backgroundColor': 'rgb(230, 230, 230)', 'fontWeight': 'bold'}
+            )
+        ], style={'width': '65%', 'display': 'inline-block', 'float': 'right'})
+    ]),
+
+    html.Div([
+        html.H3("All Trade Targets (Owned & Above Upper Bound)"),
+        dash_table.DataTable(
+            id='trade-table-tot',
+            columns=[
+                {"name": "Owned CUSIP", "id": "CUSIP_Below1"},
+                {"name": "Owned ID", "id": "ID_Below1"},
+                {"name": "Matched ID", "id": "Matched_ID1"},
+                {"name": "Matched CUSIP", "id": "Matched_CUSIP1"},
+                {"name": "Ratio", "id": "Ratio_oas_dur1"},
+                {"name": "Deviation", "id": "Deviation1"},
+                {"name": "Dev Diff", "id": "Deviation_diff1"},
+                {"name": "OAS Diff", "id": "OAS_diff1"},
+                {"name": "Duration Diff", "id": "DURATION_diff1"}
+            ],
+            data=[],
+            style_table={'overflowX': 'auto'},
+            style_cell={'textAlign': 'left'},
+            style_header={'backgroundColor': 'rgb(230, 230, 230)', 'fontWeight': 'bold'}
+        )
+    ], style={'width': '100%', 'display': 'inline-block', 'float': 'right'})
+])
+
+@app.callback(
+    [Output('graph', 'figure'),
+     Output('outlier-table', 'data'),
+     Output('trade-table', 'data'),
+     Output('trade-table-tot', 'data')],
+    Input('ticker-dropdown', 'value')
+)
+
+
+
+def update_graph(selected_ticker):
+    if not selected_ticker:
+        return go.Figure(), [], [], []
+
+    df_filtered = df[df['TICKER'] == selected_ticker]
+    x = df_filtered['DURADJMOD'].values
+    y = df_filtered['OAS_BP'].values
+
+    if len(x) < 2:
+        return go.Figure(), [], [], []
+
+    # Fit Nelson-Siegel function
+    params, _ = fit_ns_curve(x, y)
+    y_fit = ns_func(x, *params)
+
+    # Sort x for smoother line
+    sorted_indices = np.argsort(x)
+    x_sorted, y_fit_sorted = x[sorted_indices], y_fit[sorted_indices]
+
+    # Compute deviation bands
+    y_fit_upper = y_fit_sorted * (1 + deviation_threshold / 100)
+    y_fit_lower = y_fit_sorted * (1 - deviation_threshold / 100)
+
+    # Assign colors based on ownership
+    colors = ['blue' if own == 'N' else 'red' for own in df_filtered['Own?']]
+
+    # Create figure
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=df_filtered['DURADJMOD'],
+        y=df_filtered['OAS_BP'],
+        mode='markers',
+        marker=dict(size=8, color=colors),
+        name=f"{selected_ticker} Bonds",
+        hovertemplate="<b>ID:</b> %{customdata[3]}<br>"
+                      "<b>CUSIP:</b> %{customdata[0]}<br>"
+                      "<b>Duration:</b> %{x}<br>"
+                      "<b>OAS:</b> %{y}<br>",
+        customdata=df_filtered[['CUSIP', 'TICKER', 'Own?', 'ID']]
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=x_sorted, y=y_fit_sorted,
+        mode='lines', line=dict(color='black'),
+        name="Nelson-Siegel Fit"
+    ))
+
+    # Add title and axis labels
+    fig.update_layout(
+        title=f"{selected_ticker} Bonds - OAS vs Duration - Nelson-Siegel",
+        xaxis=dict(
+            title="Duration Adjusted Modified (DURADJMOD)",
+            showgrid=True
+        ),
+        yaxis=dict(
+            title="OAS (Basis Points)",
+            showgrid=True
+        ),
+        legend=dict(
+            orientation="h",
+            x=0,
+            y=-0.3
+        )
+    )
+    fig.add_trace(go.Scatter(
+        x=x_sorted, y=y_fit_upper,
+        mode='lines', line=dict(color='green', dash='dash'),
+        name=f"{deviation_threshold}% Above NS Fit"
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=x_sorted, y=y_fit_lower,
+        mode='lines', line=dict(color='blue', dash='dash'),
+        name=f"{deviation_threshold}% Below NS Fit"
+    ))
+
+    df_below = df_filtered[
+        (df_filtered['Own?'] == 'Y') &
+        (df_filtered['OAS_BP'] < ns_func(df_filtered['DURADJMOD'], *params) * (1 - deviation_threshold / 100))
+    ].copy()
+
+    if not df_below.empty:
+        df_below.loc[:, 'Deviation'] = round(df_below['OAS_BP'] - ns_func(df_below['DURADJMOD'], *params), 2)
+        df_below.loc[:, 'Above/Below'] = 'Below'
+
+    df_above = df_filtered[
+        (df_filtered['Own?'] == 'N') &
+        (df_filtered['OAS_BP'] > ns_func(df_filtered['DURADJMOD'], *params) * (1 + deviation_threshold / 100))
+    ].copy()
+
+    if not df_above.empty:
+        df_above.loc[:, 'Deviation'] = round(df_above['OAS_BP'] - ns_func(df_above['DURADJMOD'], *params), 2)
+        df_above.loc[:, 'Above/Below'] = 'Above'
+
+    trade_data = []
+    for _, row_below in df_below.iterrows():
+        for _, row_above in df_above.iterrows():
+            if row_above['DURADJMOD'] > row_below['DURADJMOD']:
+                ratio_oas_dur = round(((row_above['OAS_BP'] - row_below['OAS_BP']) / (row_above['DURADJMOD'] - row_below['DURADJMOD'])), 2)
+                if ratio_oas_dur > 10:
+                    trade_data.append({
+                        "CUSIP_Below": row_below['CUSIP'],
+                        "ID_Below": row_below['ID'],
+                        "Matched_CUSIP": row_above['CUSIP'],
+                        "Matched_ID": row_above['ID'],
+                        "Ratio_oas_dur": ratio_oas_dur,
+                        "Deviation": round(row_above['Deviation'], 2),
+                        "Deviation_diff": round(row_above['Deviation'] - row_below['Deviation'], 2),
+                        "OAS_diff": round(row_above['OAS_BP'] - row_below['OAS_BP'], 2),
+                        "DURATION_diff": round(row_above['DURADJMOD'] - row_below['DURADJMOD'], 2),
+                        "Above/Below": row_above['Above/Below'],
+                        "Own?": row_above['Own?']
+                    })
+
+    trade_data = sorted(trade_data, key=lambda x: x['Ratio_oas_dur'], reverse=False)
+    results_df = pd.DataFrame(trade_data_tot)
+    output_file = 'R:/Jupyter Notebooks/bond_curve_fit_results_NS.xlsx'
+    results_df.to_excel(output_file, index=False)
+    return fig, df_below.to_dict('records'), trade_data, trade_data_tot
+
+if __name__ == '__main__':
+    app.run(debug=True, port=8051)
+
+
+
