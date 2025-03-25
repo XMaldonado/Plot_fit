@@ -5,6 +5,7 @@ from scipy.optimize import curve_fit
 import snowflake.connector
 import dash
 from dash import dcc, html, Input, Output, dash_table
+import streamlit as st
 
 # Set deviation threshold (change this value once)
 deviation_threshold = 5  # Change to any percentage you want
