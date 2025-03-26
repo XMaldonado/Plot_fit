@@ -1,0 +1,55 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import snowflake.connector
+
+st.title("Bond Scatter Plot (OAS vs Duration)")
+
+# --- Snowflake Connection ---
+@st.cache_resource
+def connect_snowflake():
+    return snowflake.connector.connect(
+        user='SAGESNOW',
+        password='V2^cHfBnQQdbx28duWx*d',
+        account='ESA97740.east-us-2.azure',
+        warehouse='COMPUTE_WH',
+        database='SAGENEXTGEN',
+        schema='PUBLIC'
+    )
+
+# --- Load Bond Data ---
+@st.cache_data
+def load_bonds():
+    conn = connect_snowflake()
+    query = "SELECT * FROM TRADERS.BLOOMBERG_IMPORTS.DAILY_CURVE_IG_DATA"
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    df['DURADJMOD'] = pd.to_numeric(df['DURADJMOD'], errors='coerce')
+    df['OAS_BP'] = pd.to_numeric(df['OAS_BP'], errors='coerce')
+    df = df.dropna(subset=['DURADJMOD', 'OAS_BP'])
+    return df
+
+df_bonds = load_bonds()
+
+# --- Ticker Selection ---
+tickers = sorted(df_bonds['TICKER'].dropna().unique())
+selected_ticker = st.selectbox("Choose a Ticker", tickers)
+
+# --- Filter and Plot ---
+df_selected = df_bonds[df_bonds['TICKER'] == selected_ticker]
+
+st.subheader(f"Scatter Plot for {selected_ticker}")
+fig = px.scatter(
+    df_selected,
+    x="DURADJMOD",
+    y="OAS_BP",
+    hover_data=["CUSIP", "COUPON", "MATURDATE"],
+    labels={"DURADJMOD": "Duration", "OAS_BP": "OAS (bps)"},
+    title="OAS vs Duration"
+)
+st.plotly_chart(fig, use_container_width=True)
+
+
+streamlit run scatter_app.py
